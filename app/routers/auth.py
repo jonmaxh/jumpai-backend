@@ -28,7 +28,12 @@ def create_jwt_token(user_id: int) -> str:
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    token = request.cookies.get("session_token")
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.cookies.get("session_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -166,15 +171,8 @@ async def google_callback(
 
     token = create_jwt_token(user.id)
 
-    response = RedirectResponse(url=settings.frontend_url)
-    response.set_cookie(
-        key="session_token",
-        value=token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=JWT_EXPIRY_DAYS * 24 * 60 * 60,
-    )
+    redirect_url = f"{settings.frontend_url}?token={token}"   
+    response = RedirectResponse(url=redirect_url)
     response.delete_cookie("oauth_state")
 
     return response
