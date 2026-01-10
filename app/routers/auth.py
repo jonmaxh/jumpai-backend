@@ -27,6 +27,15 @@ def create_jwt_token(user_id: int) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=JWT_ALGORITHM)
 
 
+def _cookie_settings() -> dict:
+    is_secure = settings.backend_url.startswith("https://")
+    return {
+        "httponly": True,
+        "secure": is_secure,
+        "samesite": "none" if is_secure else "lax",
+    }
+
+
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     token = None
     auth_header = request.headers.get("Authorization")
@@ -83,10 +92,8 @@ async def google_auth(request: Request):
     response.set_cookie(
         key="oauth_state",
         value=state,
-        httponly=True,
-        secure=False,
-        samesite="lax",
         max_age=600,
+        **_cookie_settings(),
     )
 
     return response
@@ -171,8 +178,13 @@ async def google_callback(
 
     token = create_jwt_token(user.id)
 
-    redirect_url = f"{settings.frontend_url}?token={token}"   
-    response = RedirectResponse(url=redirect_url)
+    response = RedirectResponse(url=settings.frontend_url)
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        max_age=JWT_EXPIRY_DAYS * 24 * 60 * 60,
+        **_cookie_settings(),
+    )
     response.delete_cookie("oauth_state")
 
     return response
@@ -218,10 +230,8 @@ async def connect_account(request: Request, current_user: User = Depends(get_cur
     response.set_cookie(
         key="connect_state",
         value=state,
-        httponly=True,
-        secure=False,
-        samesite="lax",
         max_age=600,
+        **_cookie_settings(),
     )
 
     return response
