@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.models import GmailAccount, Email, Category
 from app.services.gmail import GmailService
 from app.services.ai import AIService
+from app.services.events import publish
 from app.utils import decrypt_token
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
@@ -102,6 +103,17 @@ async def process_gmail_notification(
         account.last_history_id = history_id
         account.last_synced_at = datetime.utcnow()
         db.commit()
+
+        publish(
+            account.user_id,
+            {
+                "event": "emails_synced",
+                "account_id": account.id,
+                "synced_count": synced_count,
+                "archived_count": archived_count,
+                "timestamp": account.last_synced_at.isoformat(),
+            },
+        )
 
         print(
             f"Push notification processed: synced {synced_count} new emails "

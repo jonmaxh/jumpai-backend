@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import init_db
 from app.config import get_settings
-from app.routers import auth, accounts, categories, emails, webhooks
+from app.routers import auth, accounts, categories, emails, webhooks, events
 
 settings = get_settings()
 
@@ -34,6 +34,7 @@ app.include_router(accounts.router)
 app.include_router(categories.router)
 app.include_router(emails.router)
 app.include_router(webhooks.router)
+app.include_router(events.router)
 
 
 @app.get("/api/health")
