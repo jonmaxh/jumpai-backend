@@ -44,9 +44,14 @@ async def process_gmail_notification(
 
         # Get user's categories for AI categorization
         categories = db.query(Category).filter(Category.user_id == account.user_id).all()
+        category_data = [
+            {"id": cat.id, "name": cat.name, "description": cat.description}
+            for cat in categories
+        ]
         ai_service = AIService()
 
         synced_count = 0
+        archived_count = 0
         for msg_id in new_message_ids:
             # Check if already exists
             existing = db.query(Email).filter(
@@ -60,18 +65,13 @@ async def process_gmail_notification(
             try:
                 msg_detail = gmail.get_message_detail(msg_id)
 
-                # AI categorization
-                category_id = None
-                ai_summary = None
-                if categories:
-                    result = ai_service.categorize_email(
-                        subject=msg_detail["subject"],
-                        sender=msg_detail["sender"],
-                        body_preview=msg_detail["body_text"][:500] if msg_detail["body_text"] else "",
-                        categories=categories
-                    )
-                    category_id = result.get("category_id")
-                    ai_summary = result.get("summary")
+                # AI categorization + summary
+                category_id, ai_summary = ai_service.process_email(
+                    subject=msg_detail["subject"],
+                    sender=msg_detail["sender"],
+                    body_text=msg_detail.get("body_text") or "",
+                    categories=category_data,
+                )
 
                 email = Email(
                     gmail_account_id=account.id,
@@ -88,6 +88,11 @@ async def process_gmail_notification(
                 )
                 db.add(email)
                 synced_count += 1
+                try:
+                    gmail.archive_message(msg_id)
+                    archived_count += 1
+                except Exception as e:
+                    print(f"Failed to archive message {msg_id}: {e}")
 
             except Exception as e:
                 print(f"Error processing message {msg_id}: {e}")
@@ -98,7 +103,10 @@ async def process_gmail_notification(
         account.last_synced_at = datetime.utcnow()
         db.commit()
 
-        print(f"Push notification processed: synced {synced_count} new emails for account {account.email}")
+        print(
+            f"Push notification processed: synced {synced_count} new emails "
+            f"(archived {archived_count}) for account {account.email}"
+        )
 
     except Exception as e:
         print(f"Error processing Gmail notification for account {account_id}: {e}")
