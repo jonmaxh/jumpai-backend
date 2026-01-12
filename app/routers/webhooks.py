@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 import base64
 import json
 from datetime import datetime
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.config import get_settings
 from app.models import GmailAccount, Email, Category
 from app.services.gmail import GmailService
@@ -18,14 +18,17 @@ settings = get_settings()
 async def process_gmail_notification(
     account_id: int,
     history_id: str,
-    db: Session,
+    db: Session | None = None,
 ):
     """Process incoming Gmail notification and sync new emails."""
-    account = db.query(GmailAccount).filter(GmailAccount.id == account_id).first()
-    if not account:
-        return
-
+    owns_session = db is None
+    if owns_session:
+        db = SessionLocal()
     try:
+        account = db.query(GmailAccount).filter(GmailAccount.id == account_id).first()
+        if not account:
+            return
+
         access_token = decrypt_token(account.access_token)
         refresh_token = decrypt_token(account.refresh_token) if account.refresh_token else None
         gmail = GmailService(access_token, refresh_token)
@@ -122,6 +125,9 @@ async def process_gmail_notification(
 
     except Exception as e:
         print(f"Error processing Gmail notification for account {account_id}: {e}")
+    finally:
+        if owns_session:
+            db.close()
 
 
 @router.post("/gmail")
@@ -197,7 +203,6 @@ async def gmail_webhook(
         process_gmail_notification,
         account_id=account.id,
         history_id=history_id,
-        db=db,
     )
 
     return {"status": "processing"}
