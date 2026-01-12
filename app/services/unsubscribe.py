@@ -37,8 +37,21 @@ class UnsubscribeAgent:
                     }
 
                 analysis = self.ai_service.analyze_unsubscribe_page(page_content)
+                has_form = bool(analysis.get("has_form"))
 
-                if analysis.get("has_form"):
+                if not has_form:
+                    for context in self._collect_contexts(page):
+                        query_selector = getattr(context, "query_selector", None)
+                        if not query_selector:
+                            continue
+                        try:
+                            if await query_selector("form"):
+                                has_form = True
+                                break
+                        except Exception:
+                            continue
+
+                if has_form:
                     result = await self._handle_form(page, analysis, user_email)
                 else:
                     result = await self._handle_simple_page(page)
@@ -104,6 +117,37 @@ class UnsubscribeAgent:
             except Exception:
                 continue
 
+    async def _context_has_visible_success(self, context, indicators) -> bool:
+        evaluate = getattr(context, "evaluate", None)
+        if not evaluate:
+            return False
+        try:
+            return await evaluate(
+                """
+                (indicators) => {
+                  const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                      return false;
+                    }
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                  };
+                  const nodes = Array.from(document.querySelectorAll('body *'));
+                  return nodes.some((el) => {
+                    const text = (el.textContent || '').toLowerCase();
+                    if (!text) return false;
+                    if (!indicators.some((indicator) => text.includes(indicator))) return false;
+                    return isVisible(el);
+                  });
+                }
+                """,
+                indicators,
+            )
+        except Exception:
+            return False
+
     async def _check_success_in_contexts(self, contexts) -> bool:
         success_indicators = [
             "successfully unsubscribed",
@@ -114,7 +158,19 @@ class UnsubscribeAgent:
             "no longer receive",
             "unsubscribe complete",
             "you are unsubscribed",
+            "preferences have been updated successfully",
+            "updated successfully",
         ]
+
+        had_visible_check = False
+        for context in contexts:
+            if getattr(context, "evaluate", None):
+                had_visible_check = True
+                if await self._context_has_visible_success(context, success_indicators):
+                    return True
+
+        if had_visible_check:
+            return False
 
         for context in contexts:
             content = ""
@@ -127,6 +183,91 @@ class UnsubscribeAgent:
                 return True
 
         return False
+
+    async def _fill_required_fields(self, contexts, user_email: Optional[str]) -> bool:
+        email_value = user_email or "user@example.com"
+        text_value = "Please unsubscribe me."
+        filled_any = False
+
+        for context in contexts:
+            query_selector_all = getattr(context, "query_selector_all", None)
+            if not query_selector_all:
+                continue
+
+            try:
+                inputs = await query_selector_all("input[required]")
+            except Exception:
+                inputs = []
+
+            for input_el in inputs:
+                try:
+                    input_type = (await input_el.get_attribute("type") or "").lower()
+                    name = (await input_el.get_attribute("name") or "").lower()
+                    element_id = (await input_el.get_attribute("id") or "").lower()
+
+                    if input_type in ["checkbox", "radio"]:
+                        await input_el.check()
+                        filled_any = True
+                        continue
+
+                    if input_type == "email" or "email" in name or "email" in element_id:
+                        await input_el.fill(email_value)
+                        filled_any = True
+                        continue
+
+                    if input_type == "url":
+                        await input_el.fill("https://example.com")
+                        filled_any = True
+                        continue
+
+                    if input_type == "tel":
+                        await input_el.fill("0000000000")
+                        filled_any = True
+                        continue
+
+                    if input_type == "number":
+                        await input_el.fill("1")
+                        filled_any = True
+                        continue
+
+                    await input_el.fill("unsubscribe")
+                    filled_any = True
+                except Exception:
+                    continue
+
+            try:
+                selects = await query_selector_all("select[required]")
+            except Exception:
+                selects = []
+
+            for select in selects:
+                try:
+                    options = await select.query_selector_all("option")
+                    selected_value = None
+                    for option in options:
+                        value = await option.get_attribute("value")
+                        if value and value.strip():
+                            selected_value = value
+                            break
+                    if selected_value:
+                        await select.select_option(value=selected_value)
+                        filled_any = True
+                except Exception:
+                    continue
+
+            try:
+                textareas = await query_selector_all("textarea[required]")
+            except Exception:
+                textareas = []
+
+            for textarea in textareas:
+                try:
+                    await textarea.fill(text_value)
+                    filled_any = True
+                except Exception:
+                    continue
+
+        return filled_any
 
     async def _check_already_unsubscribed(self, page: Page) -> bool:
         """Check if page indicates user is already unsubscribed."""
@@ -164,6 +305,8 @@ class UnsubscribeAgent:
                             break
                     if filled:
                         break
+
+            await self._fill_required_fields(contexts, user_email)
 
             for checkbox in analysis.get("checkbox_selectors", []):
                 for context in contexts:
