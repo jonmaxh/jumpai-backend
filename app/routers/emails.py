@@ -540,7 +540,8 @@ async def bulk_unsubscribe(
             continue
 
         try:
-            result = await async_unsubscribe(unsubscribe_link, email.sender_email)
+            account_email = email.gmail_account.email if email.gmail_account else None
+            result = await async_unsubscribe(unsubscribe_link, account_email)
 
             results.append(UnsubscribeResult(
                 email_id=email.id,
