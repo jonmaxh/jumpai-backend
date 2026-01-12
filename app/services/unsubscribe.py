@@ -1,4 +1,4 @@
-from playwright.async_api import async_playwright, Page, Browser
+from playwright.async_api import async_playwright, Page
 from app.services.ai import AIService
 from typing import Optional
 import asyncio
@@ -19,11 +19,13 @@ class UnsubscribeAgent:
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
             )
             page = await context.new_page()
+            page.set_default_timeout(5000)
 
             try:
                 await page.goto(url, timeout=30000)
                 await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
+                await self._wait_for_interactive(page)
 
                 page_content = await page.content()
 
@@ -51,11 +53,58 @@ class UnsubscribeAgent:
                     "message": f"Error during unsubscribe: {str(e)}"
                 }
 
-    async def _check_already_unsubscribed(self, page: Page) -> bool:
-        """Check if page indicates user is already unsubscribed."""
-        content = await page.content()
-        content_lower = content.lower()
+    def _collect_contexts(self, page: Page):
+        contexts = [page]
+        frames = getattr(page, "frames", None)
+        if frames:
+            for frame in frames:
+                if frame not in contexts:
+                    contexts.append(frame)
+        return contexts
 
+    async def _safe_fill(self, context, selector: str, value: str) -> bool:
+        try:
+            await context.fill(selector, value, timeout=2000)
+            return True
+        except TypeError:
+            await context.fill(selector, value)
+            return True
+        except Exception:
+            return False
+
+    async def _safe_click(self, context, selector: str) -> bool:
+        try:
+            await context.click(selector, timeout=2000)
+            return True
+        except TypeError:
+            await context.click(selector)
+            return True
+        except Exception:
+            return False
+
+    async def _safe_check(self, context, selector: str) -> bool:
+        try:
+            await context.check(selector, timeout=2000)
+            return True
+        except TypeError:
+            await context.check(selector)
+            return True
+        except Exception:
+            return False
+
+    async def _wait_for_interactive(self, page: Page) -> None:
+        selectors = "form, input, button, a"
+        for context in self._collect_contexts(page):
+            wait_for_selector = getattr(context, "wait_for_selector", None)
+            if not wait_for_selector:
+                continue
+            try:
+                await wait_for_selector(selectors, timeout=4000, state="visible")
+                return
+            except Exception:
+                continue
+
+    async def _check_success_in_contexts(self, contexts) -> bool:
         success_indicators = [
             "successfully unsubscribed",
             "you have been unsubscribed",
@@ -63,9 +112,25 @@ class UnsubscribeAgent:
             "you've been removed",
             "removed from our list",
             "no longer receive",
+            "unsubscribe complete",
+            "you are unsubscribed",
         ]
 
-        return any(indicator in content_lower for indicator in success_indicators)
+        for context in contexts:
+            content = ""
+            try:
+                content = await context.content()
+            except Exception:
+                continue
+            content_lower = content.lower()
+            if any(indicator in content_lower for indicator in success_indicators):
+                return True
+
+        return False
+
+    async def _check_already_unsubscribed(self, page: Page) -> bool:
+        """Check if page indicates user is already unsubscribed."""
+        return await self._check_success_in_contexts(self._collect_contexts(page))
 
     async def _handle_form(
         self,
@@ -75,52 +140,93 @@ class UnsubscribeAgent:
     ) -> dict:
         """Handle form-based unsubscribe pages."""
         try:
+            contexts = self._collect_contexts(page)
+            submitted = False
+            filled = False
+
             if analysis.get("email_field_selector") and user_email:
-                try:
-                    await page.fill(analysis["email_field_selector"], user_email)
-                except Exception:
-                    pass
+                for context in contexts:
+                    if await self._safe_fill(context, analysis["email_field_selector"], user_email):
+                        filled = True
+                        break
+
+            if not filled and user_email:
+                fallback_email_selectors = [
+                    'input[type="email"]',
+                    'input[name*="email" i]',
+                    'input[id*="email" i]',
+                    'input[placeholder*="email" i]',
+                ]
+                for selector in fallback_email_selectors:
+                    for context in contexts:
+                        if await self._safe_fill(context, selector, user_email):
+                            filled = True
+                            break
+                    if filled:
+                        break
 
             for checkbox in analysis.get("checkbox_selectors", []):
-                try:
-                    await page.check(checkbox)
-                except Exception:
-                    pass
+                for context in contexts:
+                    if await self._safe_check(context, checkbox):
+                        break
 
             for radio in analysis.get("radio_selectors", []):
-                try:
-                    await page.click(radio)
-                except Exception:
-                    pass
+                for context in contexts:
+                    if await self._safe_click(context, radio):
+                        break
 
             submit_selector = analysis.get("submit_button_selector")
             if submit_selector:
-                try:
-                    await page.click(submit_selector)
-                    await page.wait_for_load_state("domcontentloaded")
-                    await asyncio.sleep(2)
-                except Exception:
-                    pass
+                for context in contexts:
+                    if await self._safe_click(context, submit_selector):
+                        submitted = True
+                        break
+
+            if not submitted:
+                fallback_submit_selectors = [
+                    'button:has-text("unsubscribe")',
+                    'input[type="submit"]',
+                    'button[type="submit"]',
+                    'button:has-text("confirm")',
+                    'button:has-text("opt out")',
+                ]
+                for selector in fallback_submit_selectors:
+                    for context in contexts:
+                        if await self._safe_click(context, selector):
+                            submitted = True
+                            break
+                    if submitted:
+                        break
+
+            if submitted:
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(1)
 
             if analysis.get("confirmation_needed"):
                 confirm_selector = analysis.get("confirmation_button_selector")
                 if confirm_selector:
-                    try:
-                        await page.click(confirm_selector)
-                        await page.wait_for_load_state("domcontentloaded")
-                        await asyncio.sleep(2)
-                    except Exception:
-                        pass
+                    for context in contexts:
+                        if await self._safe_click(context, confirm_selector):
+                            submitted = True
+                            break
+                    await page.wait_for_load_state("domcontentloaded")
+                    await asyncio.sleep(1)
 
-            if await self._check_already_unsubscribed(page):
+            if await self._check_success_in_contexts(contexts):
                 return {
                     "success": True,
                     "message": "Successfully unsubscribed via form."
                 }
 
+            if submitted:
+                return {
+                    "success": True,
+                    "message": "Unsubscribe form submitted. Please verify manually if needed."
+                }
+
             return {
-                "success": True,
-                "message": "Unsubscribe form submitted. Please verify manually if needed."
+                "success": False,
+                "message": "Unable to locate an unsubscribe form to submit."
             }
 
         except Exception as e:
@@ -132,6 +238,8 @@ class UnsubscribeAgent:
     async def _handle_simple_page(self, page: Page) -> dict:
         """Handle pages without forms, looking for unsubscribe buttons/links."""
         try:
+            contexts = self._collect_contexts(page)
+            clicked = False
             button_selectors = [
                 'button:has-text("unsubscribe")',
                 'a:has-text("unsubscribe")',
@@ -140,28 +248,34 @@ class UnsubscribeAgent:
                 'a:has-text("confirm")',
                 'button:has-text("opt out")',
                 'a:has-text("opt out")',
+                'button[type="submit"]',
             ]
 
             for selector in button_selectors:
-                try:
-                    element = await page.query_selector(selector)
-                    if element:
-                        await element.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await asyncio.sleep(2)
-
-                        if await self._check_already_unsubscribed(page):
-                            return {
-                                "success": True,
-                                "message": "Successfully unsubscribed."
-                            }
+                for context in contexts:
+                    if await self._safe_click(context, selector):
+                        clicked = True
                         break
-                except Exception:
-                    continue
+                if clicked:
+                    await page.wait_for_load_state("domcontentloaded")
+                    await asyncio.sleep(1)
+
+                    if await self._check_success_in_contexts(contexts):
+                        return {
+                            "success": True,
+                            "message": "Successfully unsubscribed."
+                        }
+                    break
+
+            if clicked:
+                return {
+                    "success": True,
+                    "message": "Unsubscribe action submitted. Please verify manually if needed."
+                }
 
             return {
-                "success": True,
-                "message": "Unsubscribe page loaded. Manual verification may be required."
+                "success": False,
+                "message": "No unsubscribe action found on the page."
             }
 
         except Exception as e:
